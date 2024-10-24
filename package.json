@@ -1,6 +1,6 @@
 {
   "name": "dzwarp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "dayz json objects warp",
   "main": "bin/dzwarp.js",
   "type": "module",
