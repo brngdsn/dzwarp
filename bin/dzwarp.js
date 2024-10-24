@@ -13,7 +13,8 @@ const __dirname = path.dirname(__filename);
 /**
  * Parses and validates command-line arguments using flags.
  * Supports either warp coordinates (-x, -y, -z) or a warped set file (-iw), but not both.
- * @returns {Object} An object containing inputSetPath, inputSetRelationDir, warp coordinates, and warpSetPath.
+ * Also supports output directory (-o) and additional offsets (-xo, -yo, -zo).
+ * @returns {Object} An object containing all relevant flags and their values.
  */
 function parseArguments() {
     const args = process.argv.slice(2);
@@ -40,6 +41,22 @@ function parseArguments() {
                 break;
             case '-iw':
                 argMap.warpSetPath = args[++i];
+                break;
+            case '-o':
+                argMap.outputDir = args[++i];
+                break;
+            case '-xo':
+                argMap.offsetX = parseFloat(args[++i]);
+                break;
+            case '-yo':
+                argMap.offsetY = parseFloat(args[++i]);
+                break;
+            case '-zo':
+                argMap.offsetZ = parseFloat(args[++i]);
+                break;
+            case '--help':
+            case '-h':
+                displayUsageAndExit();
                 break;
             default:
                 console.error(`Unknown argument: ${arg}`);
@@ -79,9 +96,18 @@ function parseArguments() {
         }
     }
 
-    // If warp set is provided, validate it will be handled later
-    if (hasWarpSet) {
-        // No immediate validation; will validate in main()
+    // If offsets are provided, ensure they are numbers
+    if ('offsetX' in argMap && isNaN(argMap.offsetX)) {
+        console.error('Error: Flag -xo must be provided with a valid number.');
+        process.exit(1);
+    }
+    if ('offsetY' in argMap && isNaN(argMap.offsetY)) {
+        console.error('Error: Flag -yo must be provided with a valid number.');
+        process.exit(1);
+    }
+    if ('offsetZ' in argMap && isNaN(argMap.offsetZ)) {
+        console.error('Error: Flag -zo must be provided with a valid number.');
+        process.exit(1);
     }
 
     return argMap;
@@ -93,7 +119,7 @@ function parseArguments() {
 function displayUsageAndExit() {
     console.error(`
 Usage:
-  dzwarp -is <inputSetPath> [-isr <inputSetRelationDir>] (-x <warpX> -y <warpY> -z <warpZ> | -iw <warpSetPath>)
+  dzwarp -is <inputSetPath> [-isr <inputSetRelationDir>] [-o <outputDirectory>] [(-x <warpX> -y <warpY> -z <warpZ> | -iw <warpSetPath>)] [-xo <offsetX> -yo <offsetY> -zo <offsetZ>]
 
 Flags:
   -is <path>          Input Set: Path to the primary JSON file to warp. (Required)
@@ -104,13 +130,21 @@ Flags:
   -z <number>         Warp coordinate for the Z-axis. (Required if not using -iw)
   
   -iw <path>          Warp Set: Path to a JSON file representing the desired warped state of the input set. (Optional)
+  
+  -o <directory>      Output Directory: Directory where warped files will be saved. If it doesn't exist, it will be created. (Optional)
+  
+  -xo <number>        Offset for the X-axis after warping. (Optional)
+  -yo <number>        Offset for the Y-axis after warping. (Optional)
+  -zo <number>        Offset for the Z-axis after warping. (Optional)
+  
+  --help, -h          Display this help message.
 
 Examples:
-  # Warp using coordinates
-  dzwarp -is ./my-sets/my-objects.json -isr ./my-sets -x -3333.3 -y -4444.4 -z -12.0
+  # Warp using coordinates and specify an output directory with offsets
+  dzwarp -is ./my-sets/my-objects.json -isr ./my-sets -o ./warped -x -3333.3 -y -4444.4 -z -12.0 -xo 55.5 -yo 77.7 -zo -10.1
 
-  # Warp using a warped set file
-  dzwarp -is ./my-sets/my-objects.json -isr ./my-sets -iw ./my-sets/my-warped-sets.json
+  # Warp using a warped set file and specify an output directory
+  dzwarp -is ./my-sets/my-objects.json -isr ./my-sets -o ./warped -iw ./my-sets/my-warped-sets.json
 `);
     process.exit(1);
 }
@@ -118,13 +152,13 @@ Examples:
 /**
  * Generates the output file path by adding a '-warp' suffix before the file extension.
  * @param {string} inputPath - The original file path.
- * @returns {string} The new file path with the '-warp' suffix.
+ * @param {string} outputDir - The output directory where the warped file will be saved.
+ * @returns {string} The new file path with the '-warp' suffix in the output directory.
  */
-function getOutputPath(inputPath) {
-    const dir = path.dirname(inputPath);
+function getOutputPath(inputPath, outputDir) {
     const ext = path.extname(inputPath);
     const base = path.basename(inputPath, ext);
-    return path.join(dir, `${base}-warp${ext}`);
+    return path.join(outputDir, `${base}-warp${ext}`);
 }
 
 /**
@@ -229,13 +263,49 @@ async function calculateTranslationVector(args, primaryJSON) {
         deltaY = args.warpY - primaryReferencePos[1];
         deltaZ = args.warpZ - primaryReferencePos[2];
 
-        console.log('Translation Vector based on provided coordinates:');
+        console.log('Calculated Translation Vector based on provided coordinates:');
         console.log(`  X: ${deltaX}`);
         console.log(`  Y: ${deltaY}`);
         console.log(`  Z: ${deltaZ}`);
     }
 
     return { deltaX, deltaY, deltaZ };
+}
+
+/**
+ * Applies additional offsets to the translation vector.
+ * @param {Object} delta - The original translation vector.
+ * @param {Object} offsets - The additional offsets.
+ * @returns {Object} The updated translation vector with offsets applied.
+ */
+function applyOffsets(delta, offsets) {
+    const { deltaX, deltaY, deltaZ } = delta;
+    const { offsetX = 0, offsetY = 0, offsetZ = 0 } = offsets;
+
+    const newDeltaX = deltaX + offsetX;
+    const newDeltaY = deltaY + offsetY;
+    const newDeltaZ = deltaZ + offsetZ;
+
+    console.log('Final Translation Vector after applying offsets:');
+    console.log(`  X: ${newDeltaX}`);
+    console.log(`  Y: ${newDeltaY}`);
+    console.log(`  Z: ${newDeltaZ}`);
+
+    return { newDeltaX, newDeltaY, newDeltaZ };
+}
+
+/**
+ * Ensures that the output directory exists. If it doesn't, creates it.
+ * @param {string} outputDir - The path to the output directory.
+ */
+async function ensureOutputDirectory(outputDir) {
+    try {
+        await fs.mkdir(outputDir, { recursive: true });
+        console.log(`Output directory is set to: ${outputDir}`);
+    } catch (error) {
+        console.error(`Error creating output directory at ${outputDir}: ${error.message}`);
+        process.exit(1);
+    }
 }
 
 /**
@@ -268,11 +338,30 @@ async function main() {
     // Calculate translation vector
     const { deltaX, deltaY, deltaZ } = await calculateTranslationVector(args, primaryJSON);
 
+    // Apply additional offsets if provided
+    const offsets = {
+        offsetX: args.offsetX || 0,
+        offsetY: args.offsetY || 0,
+        offsetZ: args.offsetZ || 0
+    };
+
+    const { newDeltaX, newDeltaY, newDeltaZ } = applyOffsets(
+        { deltaX, deltaY, deltaZ },
+        offsets
+    );
+
+    // Determine output directory
+    let outputDir = path.dirname(absoluteInputSetPath); // Default to input file's directory
+    if (args.outputDir) {
+        outputDir = path.resolve(process.cwd(), args.outputDir);
+        await ensureOutputDirectory(outputDir);
+    }
+
     // Warp the primary input set
-    const warpedPrimaryObjects = warpObjects(primaryJSON.Objects, deltaX, deltaY, deltaZ);
+    const warpedPrimaryObjects = warpObjects(primaryJSON.Objects, newDeltaX, newDeltaY, newDeltaZ);
     primaryJSON.Objects = warpedPrimaryObjects;
 
-    const primaryOutputPath = getOutputPath(absoluteInputSetPath);
+    const primaryOutputPath = getOutputPath(absoluteInputSetPath, outputDir);
     await writeJSON(primaryOutputPath, primaryJSON);
 
     // If input set relation directory is provided, process additional sets
@@ -286,7 +375,7 @@ async function main() {
             process.exit(1);
         }
 
-        // Filter JSON files excluding the primary input set
+        // Filter JSON files excluding the primary input set and warp set
         const jsonFiles = files.filter(file => path.extname(file).toLowerCase() === '.json');
 
         for (const file of jsonFiles) {
@@ -306,10 +395,10 @@ async function main() {
             }
 
             // Warp the additional set
-            const warpedObjects = warpObjects(jsonData.Objects, deltaX, deltaY, deltaZ);
+            const warpedObjects = warpObjects(jsonData.Objects, newDeltaX, newDeltaY, newDeltaZ);
             jsonData.Objects = warpedObjects;
 
-            const outputPath = getOutputPath(filePath);
+            const outputPath = getOutputPath(filePath, outputDir);
             await writeJSON(outputPath, jsonData);
         }
     }
