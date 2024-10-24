@@ -405,3 +405,5 @@ async function main() {
 }
 
 main();
+
+// dzwarp -is ./custom/kb-sz-cherno-0303.json -isr ./custom -iw ./kb-sz-platform-sahkal-1024.json -o ./warped -xo 949.6357421875 -yo 12.3486442566 -zo 55.0546875
