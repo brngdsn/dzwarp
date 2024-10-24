@@ -1,0 +1,27 @@
+{
+  "name": "dzwarp",
+  "version": "0.2.0",
+  "description": "dayz json objects warp",
+  "main": "bin/dzwarp.js",
+  "type": "module",
+  "bin": {
+    "dzwarp": "./bin/dzwarp.js"
+  },
+  "scripts": {
+    "test": "jest",
+    "start": "node bin/dzwarp.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xkbdz/dzwarp.git"
+  },
+  "keywords": [
+    "dayz"
+  ],
+  "author": "0xkbdz",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/0xkbdz/dzwarp/issues"
+  },
+  "homepage": "https://github.com/0xkbdz/dzwarp#readme"
+}
