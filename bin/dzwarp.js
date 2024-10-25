@@ -3,6 +3,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { parseStringPromise, Builder } from 'xml2js';
 
 /**
  * Helper to get __dirname in ES modules
@@ -12,8 +13,8 @@ const __dirname = path.dirname(__filename);
 
 /**
  * Parses and validates command-line arguments using flags.
- * Supports either warp coordinates (-x, -y, -z) or a warped set file (-iw), but not both.
- * Also supports output directory (-o) and additional offsets (-xo, -yo, -zo).
+ * Supports warp coordinates (-x, -y, -z) and a warped set file (-iw).
+ * Also supports output directory (-o), additional offsets (-xo, -yo, -zo), and module type (-mod).
  * @returns {Object} An object containing all relevant flags and their values.
  */
 function parseArguments() {
@@ -29,6 +30,9 @@ function parseArguments() {
                 break;
             case '-isr':
                 argMap.inputSetRelationDir = args[++i];
+                break;
+            case '-mod':
+                argMap.module = args[++i].toLowerCase();
                 break;
             case '-x':
                 argMap.warpX = parseFloat(args[++i]);
@@ -64,32 +68,23 @@ function parseArguments() {
         }
     }
 
-    // Check for mutually exclusive options
-    const hasWarpCoordinates = ('warpX' in argMap) || ('warpY' in argMap) || ('warpZ' in argMap);
-    const hasWarpSet = 'warpSetPath' in argMap;
-
-    if (hasWarpCoordinates && hasWarpSet) {
-        console.error('Error: Provide either warp coordinates (-x, -y, -z) or a warped set file (-iw), but not both.');
-        displayUsageAndExit();
-    }
-
     // Validate required arguments
     if (!argMap.inputSetPath) {
         console.error('Error: Missing required flag -is <inputSetPath>');
         displayUsageAndExit();
     }
 
+    // Validate that either warp coordinates or warp set is provided
+    const hasWarpCoordinates = ('warpX' in argMap) && ('warpY' in argMap) && ('warpZ' in argMap);
+    const hasWarpSet = 'warpSetPath' in argMap;
+
     if (!hasWarpCoordinates && !hasWarpSet) {
-        console.error('Error: You must provide either warp coordinates (-x, -y, -z) or a warped set file (-iw).');
+        console.error('Error: You must provide either warp coordinates (-x, -y, -z) or a warp set file (-iw).');
         displayUsageAndExit();
     }
 
-    // If warp coordinates are provided, ensure all are present
+    // If warp coordinates are provided, ensure they are numbers
     if (hasWarpCoordinates) {
-        if (!('warpX' in argMap) || !('warpY' in argMap) || !('warpZ' in argMap)) {
-            console.error('Error: Flags -x, -y, and -z must all be provided when specifying warp coordinates.');
-            displayUsageAndExit();
-        }
         if (isNaN(argMap.warpX) || isNaN(argMap.warpY) || isNaN(argMap.warpZ)) {
             console.error('Error: Flags -x, -y, and -z must be provided with valid numbers.');
             process.exit(1);
@@ -110,6 +105,11 @@ function parseArguments() {
         process.exit(1);
     }
 
+    // If module is not specified, default to 'json'
+    if (!('module' in argMap)) {
+        argMap.module = 'json';
+    }
+
     return argMap;
 }
 
@@ -119,11 +119,12 @@ function parseArguments() {
 function displayUsageAndExit() {
     console.error(`
 Usage:
-  dzwarp -is <inputSetPath> [-isr <inputSetRelationDir>] [-o <outputDirectory>] [(-x <warpX> -y <warpY> -z <warpZ> | -iw <warpSetPath>)] [-xo <offsetX> -yo <offsetY> -zo <offsetZ>]
+  dzwarp -is <inputSetPath> [-mod <module>] [-isr <inputSetRelationDir>] [-o <outputDirectory>] [(-x <warpX> -y <warpY> -z <warpZ> | -iw <warpSetPath>)] [-xo <offsetX> -yo <offsetY> -zo <offsetZ>] [--help | -h]
 
 Flags:
   -is <path>          Input Set: Path to the primary JSON file to warp. (Required)
-  -isr <directory>    Input Set Relation Directory: Path to a directory containing additional JSON files to warp in relation to the primary set. (Optional)
+  -mod <module>       Module Type: Specify the module type. Supported modules: 'json', 'events'. (Default: 'json')
+  -isr <directory>    Input Set Relation Directory: Path to a directory containing additional JSON or XML files to warp in relation to the primary set. (Optional)
   
   -x <number>         Warp coordinate for the X-axis. (Required if not using -iw)
   -y <number>         Warp coordinate for the Y-axis. (Required if not using -iw)
@@ -145,6 +146,9 @@ Examples:
 
   # Warp using a warped set file and specify an output directory
   dzwarp -is ./my-sets/my-objects.json -isr ./my-sets -o ./warped -iw ./my-sets/my-warped-sets.json
+
+  # Warp using coordinates and process both JSON and XML files in -isr with module 'events'
+  dzwarp -is ./my-sets/my-objects.json -mod events -isr ./my-sets -o ./warped -x 1000.0 -y 2000.0 -z 3000.0
 `);
     process.exit(1);
 }
@@ -198,6 +202,21 @@ async function readJSON(filePath) {
 }
 
 /**
+ * Reads and parses an XML file.
+ * @param {string} filePath - The path to the XML file.
+ * @returns {Object} The parsed XML object.
+ */
+async function readXML(filePath) {
+    try {
+        const data = await fs.readFile(filePath, 'utf-8');
+        return await parseStringPromise(data, { explicitArray: false });
+    } catch (error) {
+        console.error(`Error reading or parsing XML file at ${filePath}: ${error.message}`);
+        process.exit(1);
+    }
+}
+
+/**
  * Writes a JSON object to a file with the specified path.
  * @param {string} filePath - The path to write the JSON file.
  * @param {Object} jsonData - The JSON data to write.
@@ -213,38 +232,58 @@ async function writeJSON(filePath, jsonData) {
 }
 
 /**
+ * Writes an XML object to a file with the specified path.
+ * @param {string} filePath - The path to write the XML file.
+ * @param {Object} xmlData - The XML data to write.
+ */
+async function writeXML(filePath, xmlData) {
+    try {
+        const builder = new Builder();
+        const xml = builder.buildObject(xmlData);
+        await fs.writeFile(filePath, xml, 'utf-8');
+        console.log(`Warped XML data written to ${filePath}`);
+    } catch (error) {
+        console.error(`Error writing XML file at ${filePath}: ${error.message}`);
+        process.exit(1);
+    }
+}
+
+/**
  * Calculates the translation vector based on warp coordinates or a warp set.
  * @param {Object} args - Parsed command-line arguments.
- * @param {Object} primaryJSON - The primary input set JSON object.
+ * @param {Object} primaryData - The primary input set JSON object.
+ * @param {Object} warpSetData - The warp set JSON object (if provided).
  * @returns {Object} An object containing deltaX, deltaY, and deltaZ.
  */
-async function calculateTranslationVector(args, primaryJSON) {
+async function calculateTranslationVector(args, primaryData, warpSetData) {
     let deltaX = 0;
     let deltaY = 0;
     let deltaZ = 0;
 
     if (args.warpSetPath) {
         // Warp using a warped set file
-        const absoluteWarpSetPath = path.resolve(process.cwd(), args.warpSetPath);
-        const warpJSON = await readJSON(absoluteWarpSetPath);
-
-        if (!Array.isArray(warpJSON.Objects)) {
-            console.error('Error: Warp JSON does not contain an "Objects" array.');
+        if (!Array.isArray(warpSetData.Objects)) {
+            console.error('Error: Warp set JSON does not contain an "Objects" array.');
             process.exit(1);
         }
 
-        if (warpJSON.Objects.length === 0) {
-            console.error('Error: Warp "Objects" array is empty.');
+        if (warpSetData.Objects.length === 0) {
+            console.error('Error: Warp set "Objects" array is empty.');
             process.exit(1);
         }
 
-        const warpReferenceObject = warpJSON.Objects[0];
+        const warpReferenceObject = warpSetData.Objects[0];
         if (!Array.isArray(warpReferenceObject.pos) || warpReferenceObject.pos.length < 3) {
             console.error(`Error: Reference object "${warpReferenceObject.name}" in warp set does not have a valid pos array.`);
             process.exit(1);
         }
 
-        const primaryReferenceObject = primaryJSON.Objects[0];
+        const primaryReferenceObject = primaryData.Objects[0];
+        if (!Array.isArray(primaryReferenceObject.pos) || primaryReferenceObject.pos.length < 3) {
+            console.error(`Error: Reference object "${primaryReferenceObject.name}" in primary set does not have a valid pos array.`);
+            process.exit(1);
+        }
+
         const warpReferencePos = warpReferenceObject.pos;
         const primaryReferencePos = primaryReferenceObject.pos;
 
@@ -258,7 +297,7 @@ async function calculateTranslationVector(args, primaryJSON) {
         console.log(`  Z: ${deltaZ}`);
     } else {
         // Warp using provided coordinates
-        const primaryReferencePos = primaryJSON.Objects[0].pos;
+        const primaryReferencePos = primaryData.Objects[0].pos;
         deltaX = args.warpX - primaryReferencePos[0];
         deltaY = args.warpY - primaryReferencePos[1];
         deltaZ = args.warpZ - primaryReferencePos[2];
@@ -309,12 +348,147 @@ async function ensureOutputDirectory(outputDir) {
 }
 
 /**
- * The main function that orchestrates reading, warping, and writing the JSON data.
+ * Processes JSON input sets.
+ * @param {Object} args - Parsed command-line arguments.
+ * @param {Object} primaryJSON - The primary input set JSON object.
+ * @param {Object} translation - The translation vector.
+ * @param {string} outputDir - The output directory.
+ */
+async function processJSON(args, primaryJSON, translation, outputDir) {
+    // Warp the primary input set
+    const warpedPrimaryObjects = warpObjects(primaryJSON.Objects, translation.newDeltaX, translation.newDeltaY, translation.newDeltaZ);
+    primaryJSON.Objects = warpedPrimaryObjects;
+
+    const primaryOutputPath = getOutputPath(args.inputSetPath, outputDir);
+    await writeJSON(primaryOutputPath, primaryJSON);
+
+    // If input set relation directory is provided, process additional sets
+    if (args.inputSetRelationDir) {
+        const absoluteRelationDir = path.resolve(process.cwd(), args.inputSetRelationDir);
+        let files;
+        try {
+            files = await fs.readdir(absoluteRelationDir);
+        } catch (error) {
+            console.error(`Error reading directory ${absoluteRelationDir}: ${error.message}`);
+            process.exit(1);
+        }
+
+        // Process both JSON and XML files
+        const jsonFiles = files.filter(file => path.extname(file).toLowerCase() === '.json');
+        const xmlFiles = files.filter(file => path.extname(file).toLowerCase() === '.xml');
+
+        // Process JSON files
+        for (const file of jsonFiles) {
+            const filePath = path.join(absoluteRelationDir, file);
+
+            // Skip the primary input set and warp set if it's within the relation directory
+            if (path.resolve(filePath) === path.resolve(args.inputSetPath) ||
+                (args.warpSetPath && path.resolve(filePath) === path.resolve(args.warpSetPath))) {
+                continue;
+            }
+
+            const jsonData = await readJSON(filePath);
+
+            if (!Array.isArray(jsonData.Objects)) {
+                console.warn(`Warning: JSON file "${file}" does not contain an "Objects" array. Skipping.`);
+                continue;
+            }
+
+            // Warp the additional set
+            const warpedObjects = warpObjects(jsonData.Objects, translation.newDeltaX, translation.newDeltaY, translation.newDeltaZ);
+            jsonData.Objects = warpedObjects;
+
+            const outputPath = getOutputPath(filePath, outputDir);
+            await writeJSON(outputPath, jsonData);
+        }
+
+        // Process XML files
+        for (const file of xmlFiles) {
+            const filePath = path.join(absoluteRelationDir, file);
+
+            const xmlData = await readXML(filePath);
+
+            // Determine the XML structure based on the module
+            if (args.module === 'events') {
+                await processXMLFile(xmlData, filePath, outputDir, translation);
+            } else {
+                console.warn(`Warning: XML file "${file}" encountered but no module specified to handle it. Skipping.`);
+            }
+        }
+    }
+}
+
+/**
+ * Processes a single XML file based on the module type.
+ * @param {Object} xmlData - The parsed XML data.
+ * @param {string} filePath - The path to the XML file.
+ * @param {string} outputDir - The output directory.
+ * @param {Object} translation - The translation vector.
+ */
+async function processXMLFile(xmlData, filePath, outputDir, translation) {
+    // For 'events' module, process the XML structure accordingly
+
+    // Check if 'eventposdef' and 'event' elements exist
+    if (!xmlData.eventposdef || !xmlData.eventposdef.event) {
+        console.warn(`Warning: XML file "${path.basename(filePath)}" does not contain <eventposdef> with <event> elements. Skipping.`);
+        return;
+    }
+
+    // Ensure 'event' is an array
+    const events = Array.isArray(xmlData.eventposdef.event) ? xmlData.eventposdef.event : [xmlData.eventposdef.event];
+
+    // Filter events whose name starts with 'VehicleTrd'
+    const targetEvents = events.filter(event => event.$.name.startsWith('VehicleTrd'));
+
+    if (targetEvents.length === 0) {
+        console.warn(`Warning: No events starting with "VehicleTrd" found in XML file "${path.basename(filePath)}". Skipping.`);
+        return;
+    }
+
+    // Process each target event
+    for (const event of targetEvents) {
+        if (!event.pos) continue;
+
+        // Ensure 'pos' is an array
+        const posArray = Array.isArray(event.pos) ? event.pos : [event.pos];
+
+        for (const pos of posArray) {
+            // Parse original coordinates
+            const originalX = parseFloat(pos.$.x);
+            const originalY = parseFloat(pos.$.y);
+            const originalZ = parseFloat(pos.$.z);
+
+            // Apply translation vector
+            const newX = originalX + translation.newDeltaX;
+            const newY = originalY + translation.newDeltaY;
+            const newZ = originalZ + translation.newDeltaZ;
+
+            // Update the pos attributes
+            pos.$.x = newX.toFixed(4);
+            pos.$.y = newY.toFixed(4);
+            pos.$.z = newZ.toFixed(4);
+        }
+    }
+
+    // Determine output path
+    const outputPath = getOutputPath(filePath, outputDir);
+    await writeXML(outputPath, xmlData);
+}
+
+/**
+ * The main function that orchestrates reading, warping, and writing the JSON/XML data.
  */
 async function main() {
     const args = parseArguments();
 
-    // Read the primary input set
+    // Determine output directory
+    let outputDir = path.dirname(path.resolve(process.cwd(), args.inputSetPath)); // Default to input file's directory
+    if (args.outputDir) {
+        outputDir = path.resolve(process.cwd(), args.outputDir);
+        await ensureOutputDirectory(outputDir);
+    }
+
+    // Read the primary input set (assumed to be JSON)
     const absoluteInputSetPath = path.resolve(process.cwd(), args.inputSetPath);
     const primaryJSON = await readJSON(absoluteInputSetPath);
 
@@ -329,14 +503,15 @@ async function main() {
         process.exit(1);
     }
 
-    const primaryReferenceObject = primaryJSON.Objects[0];
-    if (!Array.isArray(primaryReferenceObject.pos) || primaryReferenceObject.pos.length < 3) {
-        console.error(`Error: Reference object "${primaryReferenceObject.name}" does not have a valid pos array.`);
-        process.exit(1);
+    // Read the warp set if provided
+    let warpSetData = null;
+    if (args.warpSetPath) {
+        const absoluteWarpSetPath = path.resolve(process.cwd(), args.warpSetPath);
+        warpSetData = await readJSON(absoluteWarpSetPath);
     }
 
     // Calculate translation vector
-    const { deltaX, deltaY, deltaZ } = await calculateTranslationVector(args, primaryJSON);
+    const { deltaX, deltaY, deltaZ } = await calculateTranslationVector(args, primaryJSON, warpSetData);
 
     // Apply additional offsets if provided
     const offsets = {
@@ -350,60 +525,13 @@ async function main() {
         offsets
     );
 
-    // Determine output directory
-    let outputDir = path.dirname(absoluteInputSetPath); // Default to input file's directory
-    if (args.outputDir) {
-        outputDir = path.resolve(process.cwd(), args.outputDir);
-        await ensureOutputDirectory(outputDir);
-    }
+    const translation = { newDeltaX, newDeltaY, newDeltaZ };
 
-    // Warp the primary input set
-    const warpedPrimaryObjects = warpObjects(primaryJSON.Objects, newDeltaX, newDeltaY, newDeltaZ);
-    primaryJSON.Objects = warpedPrimaryObjects;
-
-    const primaryOutputPath = getOutputPath(absoluteInputSetPath, outputDir);
-    await writeJSON(primaryOutputPath, primaryJSON);
-
-    // If input set relation directory is provided, process additional sets
-    if (args.inputSetRelationDir) {
-        const absoluteRelationDir = path.resolve(process.cwd(), args.inputSetRelationDir);
-        let files;
-        try {
-            files = await fs.readdir(absoluteRelationDir);
-        } catch (error) {
-            console.error(`Error reading directory ${absoluteRelationDir}: ${error.message}`);
-            process.exit(1);
-        }
-
-        // Filter JSON files excluding the primary input set and warp set
-        const jsonFiles = files.filter(file => path.extname(file).toLowerCase() === '.json');
-
-        for (const file of jsonFiles) {
-            const filePath = path.join(absoluteRelationDir, file);
-
-            // Skip the primary input set and warp set if it's within the relation directory
-            if (path.resolve(filePath) === path.resolve(absoluteInputSetPath) ||
-                (args.warpSetPath && path.resolve(filePath) === path.resolve(args.warpSetPath))) {
-                continue;
-            }
-
-            const jsonData = await readJSON(filePath);
-
-            if (!Array.isArray(jsonData.Objects)) {
-                console.warn(`Warning: JSON file "${file}" does not contain an "Objects" array. Skipping.`);
-                continue;
-            }
-
-            // Warp the additional set
-            const warpedObjects = warpObjects(jsonData.Objects, newDeltaX, newDeltaY, newDeltaZ);
-            jsonData.Objects = warpedObjects;
-
-            const outputPath = getOutputPath(filePath, outputDir);
-            await writeJSON(outputPath, jsonData);
-        }
-    }
+    // Process input sets
+    await processJSON(args, primaryJSON, translation, outputDir);
 }
 
 main();
 
 // dzwarp -is ./custom/kb-sz-cherno-0303.json -isr ./custom -iw ./kb-sz-platform-sahkal-1024.json -o ./warped -xo 949.6357421875 -yo 12.3486442566 -zo 55.0546875
+// dzwarp -mod events -is ./custom/kb-sz-cherno-0303.json -isr ./custom -iw ./kb-sz-platform-sahkal-1024.json -o ./warped -xo 949.6357421875 -yo 12.3486442566 -zo 55.0546875
