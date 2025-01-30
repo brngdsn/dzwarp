@@ -12,14 +12,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
+ * Obtain the current date in MMDD format
+ */
+const currentDate = new Date();
+const month = String(currentDate.getMonth() + 1).padStart(2, '0'); // Months are zero-based
+const day = String(currentDate.getDate()).padStart(2, '0');
+const dateStr = `${month}${day}`; // e.g., '0303' for March 3rd
+
+/**
  * Parses and validates command-line arguments using flags.
  * Supports warp coordinates (-x, -y, -z) and a warped set file (-iw).
- * Also supports output directory (-o), additional offsets (-xo, -yo, -zo), and module type (-mod).
+ * Also supports output directory (-o), additional offsets (-xo, -yo, -zo), module type (-mod),
+ * and keyword swaps (--swap).
  * @returns {Object} An object containing all relevant flags and their values.
  */
 function parseArguments() {
     const args = process.argv.slice(2);
-    const argMap = {};
+    const argMap = {
+        swaps: [] // Initialize an array to hold swap pairs
+    };
 
     // Iterate through the arguments and map flags to their values
     for (let i = 0; i < args.length; i++) {
@@ -57,6 +68,20 @@ function parseArguments() {
                 break;
             case '-zo':
                 argMap.offsetZ = parseFloat(args[++i]);
+                break;
+            case '--swap':
+                const swapArg = args[++i];
+                const swapParts = swapArg.split('/');
+                if (swapParts.length !== 2) {
+                    console.error(`Error: Invalid format for --swap. Expected format is --swap from/to, got "${swapArg}".`);
+                    displayUsageAndExit();
+                }
+                const [from, to] = swapParts;
+                if (!from || !to) {
+                    console.error(`Error: Both 'from' and 'to' keywords must be specified for --swap. Received "${swapArg}".`);
+                    displayUsageAndExit();
+                }
+                argMap.swaps.push({ from, to });
                 break;
             case '--help':
             case '-h':
@@ -119,10 +144,11 @@ function parseArguments() {
 function displayUsageAndExit() {
     console.error(`
 Usage:
-  dzwarp -is <inputSetPath> [-mod <module>] [-isr <inputSetRelationDir>] [-o <outputDirectory>] [(-x <warpX> -y <warpY> -z <warpZ> | -iw <warpSetPath>)] [-xo <offsetX> -yo <offsetY> -zo <offsetZ>] [--help | -h]
+  dzwarp -is <inputSetPath> [--swap from1/to1 --swap from2/to2 ...] [-mod <module>] [-isr <inputSetRelationDir>] [-o <outputDirectory>] [(-x <warpX> -y <warpY> -z <warpZ> | -iw <warpSetPath>)] [-xo <offsetX> -yo <offsetY> -zo <offsetZ>] [--help | -h]
 
 Flags:
   -is <path>          Input Set: Path to the primary JSON file to warp. (Required)
+  --swap <from/to>    Swap Keywords: Replace 'from' keyword with 'to' keyword in output filenames. Can be used multiple times for multiple swaps.
   -mod <module>       Module Type: Specify the module type. Supported modules: 'json', 'events'. (Default: 'json')
   -isr <directory>    Input Set Relation Directory: Path to a directory containing additional JSON or XML files to warp in relation to the primary set. (Optional)
   
@@ -149,20 +175,46 @@ Examples:
 
   # Warp using coordinates and process both JSON and XML files in -isr with module 'events'
   dzwarp -is ./my-sets/my-objects.json -mod events -isr ./my-sets -o ./warped -x 1000.0 -y 2000.0 -z 3000.0
+
+  # Warp and swap 'cherno' with 'neaf' in filenames
+  dzwarp -is ./my-sets/my-objects.json --swap cherno/neaf -o ./warped
+
+  # Warp with multiple swaps
+  dzwarp -is ./my-sets/my-objects.json --swap cherno/neaf --swap old/new -o ./warped
 `);
     process.exit(1);
 }
 
 /**
- * Generates the output file path by adding a '-warp' suffix before the file extension.
+ * Generates the output file path by applying keyword swaps and replacing the four-digit date with the current date.
+ * Removes the '-warp' suffix if present.
  * @param {string} inputPath - The original file path.
  * @param {string} outputDir - The output directory where the warped file will be saved.
- * @returns {string} The new file path with the '-warp' suffix in the output directory.
+ * @param {Array} swaps - An array of swap objects with 'from' and 'to' properties.
+ * @returns {string} The new file path with applied swaps and current date in the output directory.
  */
-function getOutputPath(inputPath, outputDir) {
+function getOutputPath(inputPath, outputDir, swaps) {
     const ext = path.extname(inputPath);
-    const base = path.basename(inputPath, ext);
-    return path.join(outputDir, `${base}-warp${ext}`);
+    let base = path.basename(inputPath, ext);
+    
+    // Remove '-warp' suffix if present
+    base = base.replace(/-warp$/, '');
+    
+    // Apply keyword swaps
+    swaps.forEach(({ from, to }) => {
+        const regex = new RegExp(from, 'g');
+        base = base.replace(regex, to);
+    });
+    
+    // Replace existing four-digit date with current date
+    if (/\d{4}/.test(base)) {
+        base = base.replace(/\d{4}/, dateStr);
+    } else {
+        // If no four-digit date is found, append the current date
+        base += `-${dateStr}`;
+    }
+    
+    return path.join(outputDir, `${base}${ext}`);
 }
 
 /**
@@ -353,14 +405,19 @@ async function ensureOutputDirectory(outputDir) {
  * @param {Object} primaryJSON - The primary input set JSON object.
  * @param {Object} translation - The translation vector.
  * @param {string} outputDir - The output directory.
+ * @param {Array} spawnFiles - The array to collect new filenames.
  */
-async function processJSON(args, primaryJSON, translation, outputDir) {
+async function processJSON(args, primaryJSON, translation, outputDir, spawnFiles) {
     // Warp the primary input set
     const warpedPrimaryObjects = warpObjects(primaryJSON.Objects, translation.newDeltaX, translation.newDeltaY, translation.newDeltaZ);
     primaryJSON.Objects = warpedPrimaryObjects;
 
-    const primaryOutputPath = getOutputPath(args.inputSetPath, outputDir);
+    const primaryOutputPath = getOutputPath(args.inputSetPath, outputDir, args.swaps);
     await writeJSON(primaryOutputPath, primaryJSON);
+
+    // Extract filename and add to spawnFiles with 'custom/' prefix
+    const primaryFilename = path.basename(primaryOutputPath);
+    spawnFiles.push(`custom/${primaryFilename}`);
 
     // If input set relation directory is provided, process additional sets
     if (args.inputSetRelationDir) {
@@ -398,8 +455,12 @@ async function processJSON(args, primaryJSON, translation, outputDir) {
             const warpedObjects = warpObjects(jsonData.Objects, translation.newDeltaX, translation.newDeltaY, translation.newDeltaZ);
             jsonData.Objects = warpedObjects;
 
-            const outputPath = getOutputPath(filePath, outputDir);
+            const outputPath = getOutputPath(filePath, outputDir, args.swaps);
             await writeJSON(outputPath, jsonData);
+
+            // Extract filename and add to spawnFiles with 'custom/' prefix
+            const outputFilename = path.basename(outputPath);
+            spawnFiles.push(`custom/${outputFilename}`);
         }
 
         // Process XML files
@@ -410,7 +471,7 @@ async function processJSON(args, primaryJSON, translation, outputDir) {
 
             // Determine the XML structure based on the module
             if (args.module === 'events') {
-                await processXMLFile(xmlData, filePath, outputDir, translation);
+                await processXMLFile(xmlData, filePath, outputDir, translation, args.swaps, spawnFiles);
             } else {
                 console.warn(`Warning: XML file "${file}" encountered but no module specified to handle it. Skipping.`);
             }
@@ -424,8 +485,10 @@ async function processJSON(args, primaryJSON, translation, outputDir) {
  * @param {string} filePath - The path to the XML file.
  * @param {string} outputDir - The output directory.
  * @param {Object} translation - The translation vector.
+ * @param {Array} swaps - An array of swap objects with 'from' and 'to' properties.
+ * @param {Array} spawnFiles - The array to collect new filenames.
  */
-async function processXMLFile(xmlData, filePath, outputDir, translation) {
+async function processXMLFile(xmlData, filePath, outputDir, translation, swaps, spawnFiles) {
     // For 'events' module, process the XML structure accordingly
 
     // Check if 'eventposdef' and 'event' elements exist
@@ -471,8 +534,12 @@ async function processXMLFile(xmlData, filePath, outputDir, translation) {
     }
 
     // Determine output path
-    const outputPath = getOutputPath(filePath, outputDir);
+    const outputPath = getOutputPath(filePath, outputDir, swaps);
     await writeXML(outputPath, xmlData);
+
+    // Extract filename and add to spawnFiles with 'custom/' prefix
+    const outputFilename = path.basename(outputPath);
+    spawnFiles.push(`custom/${outputFilename}`);
 }
 
 /**
@@ -480,6 +547,9 @@ async function processXMLFile(xmlData, filePath, outputDir, translation) {
  */
 async function main() {
     const args = parseArguments();
+
+    // Initialize spawnFiles array to collect new filenames
+    const spawnFiles = [];
 
     // Determine output directory
     let outputDir = path.dirname(path.resolve(process.cwd(), args.inputSetPath)); // Default to input file's directory
@@ -527,11 +597,16 @@ async function main() {
 
     const translation = { newDeltaX, newDeltaY, newDeltaZ };
 
-    // Process input sets
-    await processJSON(args, primaryJSON, translation, outputDir);
+    // Process input sets and collect spawn files
+    await processJSON(args, primaryJSON, translation, outputDir, spawnFiles);
+
+    // Print the spawn_files array with 'custom/' prefix
+    console.log(JSON.stringify({ spawn_files: spawnFiles }, null, 4));
 }
 
 main();
 
-// dzwarp -is ./custom/kb-sz-cherno-0303.json -isr ./custom -iw ./kb-sz-platform-sahkal-1024.json -o ./warped -xo 949.6357421875 -yo 12.3486442566 -zo 55.0546875
-// dzwarp -mod events -is ./custom/kb-sz-cherno-0303.json -isr ./custom -iw ./kb-sz-platform-sahkal-1024.json -o ./warped -xo 949.6357421875 -yo 12.3486442566 -zo 55.0546875
+// Example Usage:
+// dzwarp -is ./custom/kb-sz-cherno-0303.json --swap cherno/neaf -o ./warped
+// dzwarp -is ./custom/kb-sz-cherno-0303.json --swap cherno/neaf --swap old/new -o ./warped
+// dzwarp -mod events -is ./custom/kb-sz-cherno-0303.json -isr ./custom -iw ./kb-sz-platform-sahkal-1024.json --swap cherno/neaf -o ./warped -xo 949.6357421875 -yo 12.3486442566 -zo 55.0546875
