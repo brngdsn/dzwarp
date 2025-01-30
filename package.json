@@ -1,11 +1,12 @@
 {
   "name": "dzwarp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "dayz json objects warp",
   "main": "bin/dzwarp.js",
   "type": "module",
   "bin": {
-    "dzwarp": "./bin/dzwarp.js"
+    "dzwarp": "./bin/dzwarp.js",
+    "dzzones": "./bin/dzzones.js"
   },
   "scripts": {
     "test": "jest",
@@ -25,6 +26,7 @@
   },
   "homepage": "https://github.com/0xkbdz/dzwarp#readme",
   "dependencies": {
+    "commander": "^12.1.0",
     "xml2js": "^0.6.2"
   }
 }
